@@ -9,9 +9,10 @@ from nautobot.ipam.models import Prefix, IPAddress
 class CreateSwitchPair(Job):
     """
     Creates two switches using the provided location, device type, and device role.
-    The job connects their primary interfaces (eth0) with a cable and assigns the first
-    available /31 subnet from the 10.0.0.0/8 IPAM prefix to the interfaces.
-    All objects are set to Active (or Connected for the Cable).
+    The job *does not create a new interface*; instead it locates the first existing
+    interface (by name) on each device, connects them with a cable, and assigns the
+    first available /31 subnet from the 10.0.0.0/8 IPAM prefix to those interfaces.
+    All objects (devices, IPs, prefix) are set to Active (or Connected for the Cable).
 
     When debug is enabled, additional debug messages are logged.
     """
@@ -19,9 +20,9 @@ class CreateSwitchPair(Job):
         name = "Create Switch Pair with /31 Subnet"
         description = (
             "Creates 2 switches using the selected location, device type, and device role. "
-            "The job connects their primary interfaces (eth0) with a cable and assigns the first "
-            "available /31 subnet from the 10.0.0.0/8 IPAM prefix to the interfaces. "
-            "All objects are set to Active (or Connected for cables). Enable debug mode for additional logging."
+            "It retrieves the first existing interface (by name) from each device and connects "
+            "them with a cable, then assigns the first available /31 subnet from 10.0.0.0/8. "
+            "All objects are set to Active (Connected for cables). Enable debug mode for additional logging."
         )
         field_order = ["location", "device_type", "device_role", "debug"]
 
@@ -72,7 +73,10 @@ class CreateSwitchPair(Job):
         switch1.validated_save()
         self.logger.info("Created device", extra={"object": switch1})
         if debug:
-            self.logger.debug("Switch1 created with device_type=%s, role=%s, location=%s", device_type, device_role, location)
+            self.logger.debug(
+                "Switch1 created with device_type=%s, role=%s, location=%s",
+                device_type, device_role, location
+            )
 
         switch2 = Device(
             name=device_name2,
@@ -84,30 +88,24 @@ class CreateSwitchPair(Job):
         switch2.validated_save()
         self.logger.info("Created device", extra={"object": switch2})
         if debug:
-            self.logger.debug("Switch2 created with device_type=%s, role=%s, location=%s", device_type, device_role, location)
+            self.logger.debug(
+                "Switch2 created with device_type=%s, role=%s, location=%s",
+                device_type, device_role, location
+            )
 
-        # Create the primary interface (eth0) for each switch.
-        iface1 = Interface(
-            device=switch1,
-            name="eth0",
-            type="1000base-t",
-            status=active_status,
-        )
-        iface1.validated_save()
-        self.logger.info("Created interface on switch1", extra={"object": iface1})
-        if debug:
-            self.logger.debug("Interface created on switch1: %s", iface1)
+        # Retrieve the "first" interface for each device, ordered by name.
+        # Raise an error if no interface is found on a device.
+        iface1 = switch1.interfaces.order_by("name").first()
+        if not iface1:
+            raise ValueError(f"No interface found on device {switch1.name}. Please create an interface before running this job.")
 
-        iface2 = Interface(
-            device=switch2,
-            name="eth0",
-            type="1000base-t",
-            status=active_status,
-        )
-        iface2.validated_save()
-        self.logger.info("Created interface on switch2", extra={"object": iface2})
+        iface2 = switch2.interfaces.order_by("name").first()
+        if not iface2:
+            raise ValueError(f"No interface found on device {switch2.name}. Please create an interface before running this job.")
+
         if debug:
-            self.logger.debug("Interface created on switch2: %s", iface2)
+            self.logger.debug("Retrieved first interface of switch1: %s", iface1)
+            self.logger.debug("Retrieved first interface of switch2: %s", iface2)
 
         # Retrieve the Cable status ("Connected") as a Status instance.
         cable_status = Status.objects.get(name="Connected")
@@ -150,7 +148,12 @@ class CreateSwitchPair(Job):
                 candidate_ip_a = ip_a
                 candidate_ip_b = ip_b
                 if debug:
-                    self.logger.debug("Found available candidate subnet: %s with IPs %s and %s", candidate_subnet_str, candidate_ip_a, candidate_ip_b)
+                    self.logger.debug(
+                        "Found available candidate subnet: %s with IPs %s and %s",
+                        candidate_subnet_str,
+                        candidate_ip_a,
+                        candidate_ip_b
+                    )
                 break
 
         if candidate_subnet_str is None:
@@ -194,16 +197,21 @@ class CreateSwitchPair(Job):
         # Generate a CSV summary of the new devices, interfaces, and assigned IPs.
         output_lines = ["device,interface,ip_address"]
         for switch in (switch1, switch2):
-            # Retrieve the IP address via the many-to-many "interfaces" relation.
-            interface = switch.interfaces.get(name="eth0")
+            interface = switch.interfaces.order_by("name").first()
             ip_obj = IPAddress.objects.filter(interfaces=interface).first()
             ip_str = ip_obj.address if ip_obj else "None"
             output_lines.append(f"{switch.name},{interface.name},{ip_str}")
             if debug:
-                self.logger.debug("Summary entry for %s: interface %s with IP %s", switch.name, interface.name, ip_str)
+                self.logger.debug(
+                    "Summary entry for %s: interface %s with IP %s",
+                    switch.name, interface.name, ip_str
+                )
 
         if debug:
-            self.logger.debug("Job completed successfully. Output:\n%s", "\n".join(output_lines))
+            self.logger.debug(
+                "Job completed successfully. Output:\n%s",
+                "\n".join(output_lines)
+            )
 
         return "\n".join(output_lines)
 
